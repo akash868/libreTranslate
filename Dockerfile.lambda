@@ -1,64 +1,58 @@
-# Dockerfile.lambda
-# Related file (your main entrypoint): file:///D:/Libre%20translate/LibreTranslate/main.py
-#
-# Builds a Lambda-compatible container image for LibreTranslate.
-# - Uses a builder stage (copies your existing venv and installed packages)
-# - Optionally bundles models at build time with --build-arg with_models=true
-# - Uses AWS Lambda Python 3.11 base image for runtime
-# - Exposes handler.lambda_handler as the Lambda entrypoint
+# Dockerfile.lambda (Final version for proxy-mode handler.py)
+# Option B — clean install into system Python (no venv at runtime)
 
-# ------------------ Builder stage (reuse your existing build logic) ------------------
 FROM python:3.11.11-slim-bullseye AS builder
 
 WORKDIR /app
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update -qq \
-  && apt-get -qqq install --no-install-recommends -y pkg-config gcc g++ \
-  && apt-get upgrade --assume-yes \
+  && apt-get -qqq install --no-install-recommends -y pkg-config gcc g++ curl build-essential \
   && apt-get clean \
-  && rm -rf /var/lib/apt
+  && rm -rf /var/lib/apt/lists/*
 
-# create virtualenv and upgrade pip
-RUN python -mvenv venv && ./venv/bin/pip install --no-cache-dir --upgrade pip
+# Install build tooling
+RUN python -m pip install --upgrade pip setuptools wheel
 
-# copy source
-COPY . .
+# Copy project
+COPY . /app
 
-# Install package from source code, compile translations and install runtime deps
-RUN ./venv/bin/pip install Babel==2.12.1 \
-  && ./venv/bin/python scripts/compile_locales.py \
-  && ./venv/bin/pip install torch==$(grep -o -m1 'torch.*;' pyproject.toml | sed 's/[^0-9.]//g') --extra-index-url https://download.pytorch.org/whl/cpu \
-  && ./venv/bin/pip install "numpy<2" \
-  && ./venv/bin/pip install . \
-  && ./venv/bin/pip cache purge
+# Install all runtime dependencies into /app/site-packages
+RUN pip install Babel==2.12.1 \
+  && python scripts/compile_locales.py \
+  && pip install --no-cache-dir "numpy<2" \
+  && pip install --no-cache-dir torch==$(grep -o -m1 'torch.*;' pyproject.toml | sed 's/[^0-9.]//g') --extra-index-url https://download.pytorch.org/whl/cpu \
+  && pip install --no-cache-dir --target=/app/site-packages . \
+  && pip cache purge
 
-# Optional: install models during build if requested (will be copied into image)
+# Optional: install models at build time (NOT RECOMMENDED for Lambda)
 ARG with_models=false
 ARG models=""
 RUN if [ "$with_models" = "true" ]; then \
       if [ ! -z "$models" ]; then \
-        ./venv/bin/python scripts/install_models.py --load_only_lang_codes "$models"; \
+        python scripts/install_models.py --load_only_lang_codes "$models"; \
       else \
-        ./venv/bin/python scripts/install_models.py; \
+        python scripts/install_models.py; \
       fi; \
     fi
 
-# ------------------ Runtime stage: AWS Lambda base image ------------------
+# ------------------ Runtime: AWS Lambda ------------------
 FROM public.ecr.aws/lambda/python:3.11
 
-# copy application code and venv from builder
-# copy entire /app into /var/task (Lambda base image uses /var/task as working directory)
-COPY --from=builder /app /var/task
 WORKDIR /var/task
 
-# Ensure runtime dependencies are available to the system python used in Lambda image
-# If your venv site-packages are not on sys.path at runtime, we install critical packages
-# into the Lambda image Python environment (mangum/awsgi/boto3). boto3 is usually available
-# in the Lambda runtime, but installing here ensures compatibility with the builder packages.
-RUN python -m pip install --upgrade pip \
-  && pip install mangum awsgi boto3 || true
+# Copy all project files
+COPY --from=builder /app /var/task
 
-# Make sure handler.py exists at repo root (handler.lambda_handler)
-# CMD instructs Lambda which handler to invoke from the image
+# Copy pre-built Python packages from builder to Lambda's system site-packages
+RUN mkdir -p /var/lang/lib/python3.11/site-packages \
+  && cp -r /var/task/site-packages/* /var/lang/lib/python3.11/site-packages/ || true
+
+# Runtime utilities (optional)
+RUN python -m pip install --upgrade pip setuptools wheel
+
+# Expose port for local debugging (Lambda ignores EXPOSE)
+EXPOSE 5000
+
+# Use your existing fallback-proxy handler
 CMD ["handler.lambda_handler"]

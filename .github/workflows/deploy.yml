@@ -32,6 +32,23 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      # ===========================================================
+      # NEW STEP → ENSURE ECR REPOSITORY EXISTS
+      # ===========================================================
+      - name: Ensure ECR repository exists
+        shell: bash
+        run: |
+          REPO="${{ secrets.ECR_REPO_NAME }}"
+          REGION="${{ secrets.AWS_REGION }}"
+          echo "Checking if ECR repo $REPO exists in $REGION..."
+
+          if aws ecr describe-repositories --repository-names "$REPO" --region "$REGION" >/dev/null 2>&1; then
+            echo "ECR repo exists: $REPO"
+          else
+            echo "ECR repo does NOT exist. Creating now..."
+            aws ecr create-repository --repository-name "$REPO" --region "$REGION"
+          fi
+
       - name: Build Docker image
         run: |
           docker build -t ${{ secrets.ECR_REPO_NAME }}:${IMAGE_TAG} -f Dockerfile.lambda .
@@ -51,10 +68,12 @@ jobs:
 
       - name: Validate model exists in S3
         run: |
+          echo "Checking S3 model file..."
           if aws s3 ls "s3://${{ secrets.MODEL_BUCKET }}/${{ secrets.MODEL_S3_KEY }}" >/dev/null; then
-            echo "Model found successfully."
+            echo "Model found successfully in S3."
           else
-            echo "ERROR: Model not found in S3."
+            echo "ERROR: Model NOT found in S3:"
+            echo "Expected: s3://${{ secrets.MODEL_BUCKET }}/${{ secrets.MODEL_S3_KEY }}"
             exit 1
           fi
 
@@ -76,6 +95,8 @@ jobs:
             --stack-name "${{ secrets.STACK_NAME }}" \
             --query "Stacks[0].Outputs[?OutputKey=='LambdaFunctionName'].OutputValue" \
             --output text)
+
+          echo "Lambda Function Name: $FUNCTION_NAME"
 
           aws lambda create-function-url-config \
             --function-name "$FUNCTION_NAME" \
