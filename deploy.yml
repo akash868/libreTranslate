@@ -2,8 +2,7 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Deploy LibreTranslate as AWS Lambda (Container image) with models stored in S3.
   This template creates:
-   - ECR repository
-   - S3 bucket (for models)
+   - S3 bucket (for models) [optional]
    - IAM role for Lambda with S3 read & CloudWatch logs
    - Lambda function (ImageUri formed from ECR repo + ImageTag parameter)
 
@@ -11,7 +10,7 @@ Parameters:
   RepositoryName:
     Type: String
     Default: libretranslate-lambda
-    Description: ECR repository name (will be created)
+    Description: ECR repository name (the workflow creates/pushes the image here)
   ImageTag:
     Type: String
     Default: latest
@@ -60,12 +59,6 @@ Resources:
       Value: !Ref ModelBucket
       Tier: Standard
 
-  # ECR repository for container image
-  LibreTranslateECR:
-    Type: AWS::ECR::Repository
-    Properties:
-      RepositoryName: !Ref RepositoryName
-
   # IAM role for Lambda (basic execution + S3 read-only)
   LambdaExecutionRole:
     Type: AWS::IAM::Role
@@ -85,7 +78,7 @@ Resources:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
         - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
 
-  # Lambda function using container image from ECR
+  # Lambda function using container image from ECR (image pushed by CI)
   LibreTranslateFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -94,7 +87,7 @@ Resources:
       Role: !GetAtt LambdaExecutionRole.Arn
       Timeout: !Ref LambdaTimeout
       MemorySize: !Ref LambdaMemory
-      # ImageUri will use the repository created above and image tag parameter
+      # ImageUri uses repo name + tag (CI must push the image to this repository)
       Code:
         ImageUri: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${RepositoryName}:${ImageTag}"
       Environment:
@@ -110,9 +103,6 @@ Outputs:
   LambdaFunctionArn:
     Description: ARN of the Lambda function
     Value: !GetAtt LibreTranslateFunction.Arn
-  ECRRepositoryUri:
-    Description: ECR repository URI
-    Value: !GetAtt LibreTranslateECR.RepositoryUri
   ModelBucketUsed:
     Description: S3 bucket where models should be uploaded
     Value: !If [ CreateBucket, !Ref ModelBucket, !Ref ModelBucketName ]
