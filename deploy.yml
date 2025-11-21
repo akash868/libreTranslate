@@ -1,0 +1,118 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Deploy LibreTranslate as AWS Lambda (Container image) with models stored in S3.
+  This template creates:
+   - ECR repository
+   - S3 bucket (for models)
+   - IAM role for Lambda with S3 read & CloudWatch logs
+   - Lambda function (ImageUri formed from ECR repo + ImageTag parameter)
+
+Parameters:
+  RepositoryName:
+    Type: String
+    Default: libretranslate-lambda
+    Description: ECR repository name (will be created)
+  ImageTag:
+    Type: String
+    Default: latest
+    Description: Image tag (e.g. latest)
+  ModelBucketName:
+    Type: String
+    Default: ''
+    Description: Name of S3 bucket for models. If left blank, template will create one.
+  ModelObjectKey:
+    Type: String
+    Default: models/models.tar.gz
+    Description: S3 key for the tar.gz of models (e.g., models/models.tar.gz)
+  LambdaMemory:
+    Type: Number
+    Default: 8192
+    Description: Lambda memory in MB
+  LambdaTimeout:
+    Type: Number
+    Default: 900
+    Description: Lambda timeout in seconds (max 900)
+
+Conditions:
+  CreateBucket: !Equals [ !Ref ModelBucketName, '' ]
+
+Resources:
+
+  # If the user left bucket name blank, create a bucket. Otherwise user-provided bucket must exist.
+  ModelBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateBucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Suspended
+
+  ModelBucketNameOut:
+    Type: AWS::SSM::Parameter
+    Condition: CreateBucket
+    Properties:
+      Name: !Sub "/libretranslate/${AWS::StackName}/model-bucket"
+      Type: String
+      Value: !Ref ModelBucket
+      Tier: Standard
+
+  # ECR repository for container image
+  LibreTranslateECR:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref RepositoryName
+
+  # IAM role for Lambda (basic execution + S3 read-only)
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-LambdaExecRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+
+  # Lambda function using container image from ECR
+  LibreTranslateFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-libretranslate"
+      PackageType: Image
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: !Ref LambdaTimeout
+      MemorySize: !Ref LambdaMemory
+      # ImageUri will use the repository created above and image tag parameter
+      Code:
+        ImageUri: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${RepositoryName}:${ImageTag}"
+      Environment:
+        Variables:
+          # If ModelBucketName parameter is blank we use the created bucket; else use provided value
+          LT_S3_BUCKET: !If [ CreateBucket, !Ref ModelBucket, !Ref ModelBucketName ]
+          LT_S3_MODEL_KEY: !Ref ModelObjectKey
+
+Outputs:
+  LambdaFunctionName:
+    Description: Name of the Lambda function
+    Value: !Ref LibreTranslateFunction
+  LambdaFunctionArn:
+    Description: ARN of the Lambda function
+    Value: !GetAtt LibreTranslateFunction.Arn
+  ECRRepositoryUri:
+    Description: ECR repository URI
+    Value: !GetAtt LibreTranslateECR.RepositoryUri
+  ModelBucketUsed:
+    Description: S3 bucket where models should be uploaded
+    Value: !If [ CreateBucket, !Ref ModelBucket, !Ref ModelBucketName ]

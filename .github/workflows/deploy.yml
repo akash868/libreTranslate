@@ -1,0 +1,71 @@
+name: Deploy LibreTranslate to AWS Lambda
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (assume role via OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Docker image for Lambda
+        run: |
+          docker build -t ${{ secrets.ECR_REPO_NAME }}:latest -f Dockerfile.lambda .
+
+      - name: Tag and push image to ECR
+        run: |
+          ECR_URI="${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPO_NAME }}:latest"
+          docker tag ${{ secrets.ECR_REPO_NAME }}:latest $ECR_URI
+          docker push $ECR_URI
+
+      - name: Upload models to S3 (create bucket per run)
+        run: |
+          echo "Uploading libretranslate-models.tar.gz to S3..."
+          # Create a unique bucket name per run (or you can reuse a fixed bucket)
+          BUCKET_NAME="${{ secrets.STACK_NAME }}-models-${{ github.run_id }}"
+          aws s3 mb s3://$BUCKET_NAME --region ${{ secrets.AWS_REGION }}
+          aws s3 cp libretranslate-models.tar.gz s3://$BUCKET_NAME/${{ secrets.MODEL_S3_KEY }}
+          echo "BUCKET_NAME=$BUCKET_NAME" >> $GITHUB_ENV
+          echo "MODEL_KEY=${{ secrets.MODEL_S3_KEY }}" >> $GITHUB_ENV
+
+      - name: Deploy CloudFormation stack
+        run: |
+          aws cloudformation deploy \
+            --stack-name "${{ secrets.STACK_NAME }}" \
+            --template-file deploy.yml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              RepositoryName="${{ secrets.ECR_REPO_NAME }}" \
+              ImageTag="latest" \
+              ModelBucketName="$BUCKET_NAME" \
+              ModelObjectKey="$MODEL_KEY"
+
+      - name: Output Lambda Function URL
+        run: |
+          FUNCTION_NAME=$(aws cloudformation describe-stacks \
+            --stack-name "${{ secrets.STACK_NAME }}" \
+            --query "Stacks[0].Outputs[?OutputKey=='LambdaFunctionName'].OutputValue" \
+            --output text)
+          echo "Function name: $FUNCTION_NAME"
+          aws lambda create-function-url-config --function-name $FUNCTION_NAME --auth-type NONE >/dev/null 2>&1 || true
+          URL=$(aws lambda get-function-url-config --function-name $FUNCTION_NAME --query FunctionUrl --output text)
+          echo "Function URL: $URL"
