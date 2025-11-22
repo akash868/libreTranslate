@@ -1,58 +1,23 @@
-# Dockerfile.lambda (Final version for proxy-mode handler.py)
-# Option B — clean install into system Python (no venv at runtime)
-
-FROM python:3.11.11-slim-bullseye AS builder
-
-WORKDIR /app
-
-ARG DEBIAN_FRONTEND=noninteractive
-RUN apt-get update -qq \
-  && apt-get -qqq install --no-install-recommends -y pkg-config gcc g++ curl build-essential \
-  && apt-get clean \
-  && rm -rf /var/lib/apt/lists/*
-
-# Install build tooling
-RUN python -m pip install --upgrade pip setuptools wheel
-
-# Copy project
-COPY . /app
-
-# Install all runtime dependencies into /app/site-packages
-RUN pip install Babel==2.12.1 \
-  && python scripts/compile_locales.py \
-  && pip install --no-cache-dir "numpy<2" \
-  && pip install --no-cache-dir torch==$(grep -o -m1 'torch.*;' pyproject.toml | sed 's/[^0-9.]//g') --extra-index-url https://download.pytorch.org/whl/cpu \
-  && pip install --no-cache-dir --target=/app/site-packages . \
-  && pip cache purge
-
-# Optional: install models at build time (NOT RECOMMENDED for Lambda)
-ARG with_models=false
-ARG models=""
-RUN if [ "$with_models" = "true" ]; then \
-      if [ ! -z "$models" ]; then \
-        python scripts/install_models.py --load_only_lang_codes "$models"; \
-      else \
-        python scripts/install_models.py; \
-      fi; \
-    fi
-
 # ------------------ Runtime: AWS Lambda ------------------
 FROM public.ecr.aws/lambda/python:3.11
 
 WORKDIR /var/task
 
-# Copy all project files
+# Copy entire application from builder
 COPY --from=builder /app /var/task
 
-# Copy pre-built Python packages from builder to Lambda's system site-packages
+# Explicitly ensure scripts folder exists and copy bootstrap scripts
+RUN mkdir -p /var/task/scripts
+COPY --from=builder /app/scripts/__init__.py /var/task/scripts/__init__.py
+COPY --from=builder /app/scripts/ensure_models_on_efs.py /var/task/scripts/ensure_models_on_efs.py
+
+# Copy pre-built Python packages
 RUN mkdir -p /var/lang/lib/python3.11/site-packages \
   && cp -r /var/task/site-packages/* /var/lang/lib/python3.11/site-packages/ || true
 
 # Runtime utilities (optional)
 RUN python -m pip install --upgrade pip setuptools wheel
 
-# Expose port for local debugging (Lambda ignores EXPOSE)
 EXPOSE 5000
 
-# Use your existing fallback-proxy handler
 CMD ["handler.lambda_handler"]

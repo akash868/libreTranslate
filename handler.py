@@ -1,4 +1,3 @@
-#handler.py
 """
 Universal Lambda handler for LibreTranslate.
 
@@ -13,8 +12,12 @@ Behavior:
 
 This avoids forcing you to change `main()` immediately. For production it's cleaner to expose
 an `app` object and use mangum/awsgi directly.
+
+This version integrates an EFS bootstrap step: if an EFS mount exists at LT_EFS_MOUNT (default
+/mnt/models) it will attempt to ensure models are present by calling scripts/ensure_models_on_efs.py.
 """
 import importlib
+import importlib.util
 import inspect
 import threading
 import time
@@ -25,6 +28,7 @@ import traceback
 import base64
 import urllib.parse
 import urllib.request
+import subprocess
 
 # --- Helper: try common import paths for app object ---
 COMMON_PATHS = [
@@ -37,6 +41,7 @@ COMMON_PATHS = [
     "app.main:app",
     "src.app:app",
 ]
+
 
 def try_find_app():
     for path in COMMON_PATHS:
@@ -51,6 +56,7 @@ def try_find_app():
         except Exception:
             continue
     return None
+
 
 # --- Attempt to find an app ---
 app = try_find_app()
@@ -72,13 +78,16 @@ if app is not None:
         except Exception as e:
             raise RuntimeError("mangum is required in the image to wrap ASGI apps. pip install mangum") from e
         handler = Mangum(app)
+
         def lambda_handler(event, context):
             return handler(event, context)
+
     else:
         try:
             import awsgi
         except Exception as e:
             raise RuntimeError("awsgi is required in the image to wrap WSGI apps. pip install awsgi") from e
+
         def lambda_handler(event, context):
             return awsgi.response(app, event, context)
 
@@ -119,6 +128,7 @@ else:
                         global server_start_exc
                         server_start_exc = e
                         traceback.print_exc()
+
                 t = threading.Thread(target=run_main, daemon=True)
                 t.start()
             else:
@@ -138,11 +148,55 @@ else:
     # Start server thread lazily on first invocation
     def ensure_server_running():
         global server_thread
+
+        # -----------------------------------------
+        # NEW: Ensure models exist in EFS (bootstrap)
+        # -----------------------------------------
+        EFS_MOUNT_PATH = os.environ.get("LT_EFS_MOUNT", "/mnt/models")
+
+        if os.path.exists(EFS_MOUNT_PATH):
+            try:
+                # First try an in-process import & call (fastest)
+                from scripts import ensure_models_on_efs as _bootstrap
+                print("[handler] EFS mount detected. Checking models in EFS...", file=sys.stderr)
+                try:
+                    ok = _bootstrap.ensure_models(mount_path=EFS_MOUNT_PATH)
+                    if not ok:
+                        print("[handler] WARNING: EFS model bootstrap returned False", file=sys.stderr)
+                except Exception:
+                    print("[handler] In-process bootstrap raised exception; falling back to subprocess", file=sys.stderr)
+                    traceback.print_exc()
+                    raise
+            except Exception:
+                # fallback: run as a subprocess to isolate issues and avoid messing with runtime state
+                print("[handler] Running model bootstrap via subprocess...", file=sys.stderr)
+                try:
+                    # Use absolute path in container
+                    subprocess.run(
+                        ["python", "/var/task/scripts/ensure_models_on_efs.py"],
+                        check=True,
+                        timeout=900,
+                    )
+                except subprocess.CalledProcessError as cpe:
+                    print(f"[handler] WARNING: EFS model bootstrap subprocess failed: {cpe}", file=sys.stderr)
+                    traceback.print_exc()
+                except Exception as e:
+                    print(f"[handler] WARNING: EFS model bootstrap subprocess exception: {e}", file=sys.stderr)
+                    traceback.print_exc()
+        else:
+            # No EFS mount present; skip bootstrap
+            pass
+
+        # -----------------------------------------
+        # ORIGINAL LOGIC BELOW (UNCHANGED)
+        # -----------------------------------------
         if server_started.is_set():
             return
+
         if server_thread is None or not server_thread.is_alive():
             server_thread = threading.Thread(target=start_main_in_thread, daemon=True)
             server_thread.start()
+
         # wait a bit for start
         server_started.wait(timeout=70.0)
         if server_start_exc:
@@ -204,7 +258,7 @@ else:
                         "statusCode": status,
                         "headers": resp_headers,
                         "body": text,
-                        "isBase64Encoded": False
+                        "isBase64Encoded": False,
                     }
                 except Exception:
                     b64 = base64.b64encode(resp_body).decode("ascii")
@@ -212,7 +266,7 @@ else:
                         "statusCode": status,
                         "headers": resp_headers,
                         "body": b64,
-                        "isBase64Encoded": True
+                        "isBase64Encoded": True,
                     }
         except urllib.error.HTTPError as e:
             body = e.read()
