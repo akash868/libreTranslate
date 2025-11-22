@@ -1,4 +1,4 @@
-# handler.py
+#handler.py
 """
 Universal Lambda handler for LibreTranslate.
 
