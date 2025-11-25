@@ -21,18 +21,19 @@ Parameters:
     Type: String
     AllowedValues: ["true", "false"]
     Default: "false"
+  # For list parameters, use an empty string (or comma-separated IDs) as default
   SubnetIds:
     Type: List<AWS::EC2::Subnet::Id>
-    Default: []
+    Default: ""           # must be a string
   SecurityGroupIds:
     Type: List<AWS::EC2::SecurityGroup::Id>
-    Default: []
+    Default: ""           # must be a string
   LambdaMemory:
     Type: Number
-    Default: 2048
+    Default: "2048"       # must be string
   LambdaTimeout:
     Type: Number
-    Default: 900
+    Default: "900"        # must be string
   StackNamePrefix:
     Type: String
     Default: ""
@@ -42,15 +43,12 @@ Conditions:
   CreateBucketCond: !Equals [ !Ref CreateBucket, "true" ]
 
 Resources:
-
-  # Optional S3 bucket if you want CloudFormation to create it
   ModelBucket:
     Type: AWS::S3::Bucket
     Condition: CreateBucketCond
     Properties:
       BucketName: !If [ CreateBucketCond, !Sub "${AWS::StackName}-models", !Ref "AWS::NoValue" ]
 
-  # Lambda execution role with S3 read permission for ModelBucketName
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -74,20 +72,26 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: "arn:aws:logs:*:*:*"
-        - PolicyName: LambdaS3ReadForModels
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action:
-                  - s3:GetObject
-                  - s3:ListBucket
-                  - s3:GetObjectVersion
-                Resource:
-                  - !Sub "arn:aws:s3:::${ModelBucketName}"
-                  - !Sub "arn:aws:s3:::${ModelBucketName}/*"
+  # Apply S3 policy conditionally when bucket name provided
+  LambdaS3ReadForModels:
+    Type: AWS::IAM::Policy
+    Condition: !Not [ !Equals [ !Ref ModelBucketName, "" ] ]
+    Properties:
+      PolicyName: LambdaS3ReadForModels
+      Roles:
+        - !Ref LambdaExecutionRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:ListBucket
+              - s3:GetObjectVersion
+            Resource:
+              - !Sub "arn:aws:s3:::${ModelBucketName}"
+              - !Sub "arn:aws:s3:::${ModelBucketName}/*"
 
-  # The Lambda function (Image packaging)
   LibreTranslateFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -103,7 +107,6 @@ Resources:
           LT_S3_BUCKET: !Ref ModelBucketName
           LT_S3_MODEL_KEY: !Ref ModelObjectKey
           LT_EFS_MOUNT: "/mnt/models"
-      # Optional VPC config if using EFS
       VpcConfig: !If
         - UseEFSCond
         - SubnetIds: !Ref SubnetIds
