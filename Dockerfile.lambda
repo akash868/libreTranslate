@@ -1,23 +1,40 @@
-# ------------------ Runtime: AWS Lambda ------------------
-FROM public.ecr.aws/lambda/python:3.11
+# ------------------ Build stage: builder ------------------
+FROM python:3.11-slim AS builder
+WORKDIR /app
 
+# Install system build deps needed by numpy/torch etc (adjust as required)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential gcc git curl unzip && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements (ensure requirements.txt exists in repo root)
+COPY requirements.txt /app/requirements.txt
+
+# Upgrade pip and install packages into /app/site-packages so we can copy them to runtime
+RUN python -m pip install --upgrade pip setuptools wheel \
+ && python -m pip install --no-cache-dir --target=/app/site-packages -r /app/requirements.txt
+
+# Copy application source into builder image
+COPY . /app
+
+# ------------------ Runtime: AWS Lambda ------------------
+FROM public.ecr.aws/lambda/python:3.11 AS runtime
 WORKDIR /var/task
 
-# Copy all application files from builder into runtime
+# Copy application code & installed packages from builder
 COPY --from=builder /app /var/task
 
-# Ensure scripts directory exists (optional safety)
+# Ensure scripts dir exists
 RUN mkdir -p /var/task/scripts
 
-# Copy pre-built Python packages from builder to Lambda's system site-packages
+# Make sure site-packages are visible to Lambda runtime
 RUN mkdir -p /var/lang/lib/python3.11/site-packages \
-  && cp -r /var/task/site-packages/* /var/lang/lib/python3.11/site-packages/ || true
+ && if [ -d /var/task/site-packages ]; then cp -r /var/task/site-packages/* /var/lang/lib/python3.11/site-packages/; fi
 
-# Runtime utilities (optional)
+# Optionally upgrade pip/setuptools in runtime
 RUN python -m pip install --upgrade pip setuptools wheel
 
 # Expose port for local debugging (Lambda ignores EXPOSE)
 EXPOSE 5000
 
-# Use your existing fallback-proxy handler
+# Lambda handler entrypoint
 CMD ["handler.lambda_handler"]

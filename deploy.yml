@@ -1,57 +1,127 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Uid: "1000"
-Gid: "1000"
-RootDirectory:
-CreationInfo:
-OwnerUid: "1000"
-OwnerGid: "1000"
-Permissions: "0755"
-Path: "/models"
+Description: LibreTranslate Lambda deployment (image-based). Provides role with S3 read and function.
 
+Parameters:
+  RepositoryName:
+    Type: String
+  ImageTag:
+    Type: String
+    Default: "latest"
+  ModelBucketName:
+    Type: String
+    Default: ""
+  ModelObjectKey:
+    Type: String
+    Default: ""
+  UseEFS:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+  CreateBucket:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Default: []
+  SecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Default: []
+  LambdaMemory:
+    Type: Number
+    Default: 2048
+  LambdaTimeout:
+    Type: Number
+    Default: 900
+  StackNamePrefix:
+    Type: String
+    Default: ""
 
-LibreTranslateMountTarget:
-Type: AWS::EFS::MountTarget
-Condition: UseEFS
-Properties:
-FileSystemId: !Ref LibreTranslateEFS
-SubnetId: !Select [ 0, !Ref SubnetIds ]
-SecurityGroups: !Ref SecurityGroupIds
+Conditions:
+  UseEFSCond: !Equals [ !Ref UseEFS, "true" ]
+  CreateBucketCond: !Equals [ !Ref CreateBucket, "true" ]
 
+Resources:
 
-LibreTranslateFunction:
-Type: AWS::Lambda::Function
-Properties:
-FunctionName: !Sub "${AWS::StackName}-libretranslate"
-PackageType: Image
-Role: !GetAtt LambdaExecutionRole.Arn
-Timeout: !Ref LambdaTimeout
-MemorySize: !Ref LambdaMemory
-Code:
-ImageUri: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${RepositoryName}:${ImageTag}"
-Environment:
-Variables:
-LT_S3_BUCKET: !If [ CreateBucket, !Ref ModelBucket, !Ref ModelBucketName ]
-LT_S3_MODEL_KEY: !Ref ModelObjectKey
-LT_EFS_MOUNT: "/mnt/models"
-VpcConfig: !If
-- UseEFS
-- SubnetIds: !Ref SubnetIds
-SecurityGroupIds: !Ref SecurityGroupIds
-- !Ref "AWS::NoValue"
-FileSystemConfigs: !If
-- UseEFS
-- - Arn: !GetAtt LibreTranslateEFSAccessPoint.Arn
-LocalMountPath: "/mnt/models"
-- !Ref "AWS::NoValue"
+  # Optional S3 bucket if you want CloudFormation to create it
+  ModelBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateBucketCond
+    Properties:
+      BucketName: !If [ CreateBucketCond, !Sub "${AWS::StackName}-models", !Ref "AWS::NoValue" ]
 
+  # Lambda execution role with S3 read permission for ModelBucketName
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-lambda-exec-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ lambda.amazonaws.com ]
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: LambdaBasicExecution
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+        - PolicyName: LambdaS3ReadForModels
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:GetObjectVersion
+                Resource:
+                  - !Sub "arn:aws:s3:::${ModelBucketName}"
+                  - !Sub "arn:aws:s3:::${ModelBucketName}/*"
+
+  # The Lambda function (Image packaging)
+  LibreTranslateFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-libretranslate"
+      PackageType: Image
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: !Ref LambdaTimeout
+      MemorySize: !Ref LambdaMemory
+      Code:
+        ImageUri: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${RepositoryName}:${ImageTag}"
+      Environment:
+        Variables:
+          LT_S3_BUCKET: !Ref ModelBucketName
+          LT_S3_MODEL_KEY: !Ref ModelObjectKey
+          LT_EFS_MOUNT: "/mnt/models"
+      # Optional VPC config if using EFS
+      VpcConfig: !If
+        - UseEFSCond
+        - SubnetIds: !Ref SubnetIds
+          SecurityGroupIds: !Ref SecurityGroupIds
+        - !Ref "AWS::NoValue"
+      FileSystemConfigs: !If
+        - UseEFSCond
+        - - Arn: !GetAtt LibreTranslateEFSAccessPoint.Arn
+            LocalMountPath: "/mnt/models"
+        - !Ref "AWS::NoValue"
 
 Outputs:
-LambdaFunctionName:
-Description: Name of the Lambda function
-Value: !Ref LibreTranslateFunction
-LambdaFunctionArn:
-Description: ARN of the Lambda function
-Value: !GetAtt LibreTranslateFunction.Arn
-ModelBucketUsed:
-Description: S3 bucket where models should be uploaded
-Value: !If [ CreateBucket, !Ref ModelBucket, !Ref ModelBucketName ]
+  LambdaFunctionName:
+    Description: Name of the Lambda function
+    Value: !Ref LibreTranslateFunction
+  LambdaFunctionArn:
+    Description: ARN of the Lambda function
+    Value: !GetAtt LibreTranslateFunction.Arn
+  ModelBucketUsed:
+    Description: S3 bucket where models should be uploaded
+    Value: !If [ CreateBucketCond, !Ref ModelBucket, !Ref ModelBucketName ]

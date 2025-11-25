@@ -1,0 +1,26 @@
+argostranslate==1.9.6
+Flask==2.2.5
+flask-swagger==0.2.14
+flask-swagger-ui==4.11.1
+Flask-Limiter==2.6.3
+Flask-Babel==3.1.0
+Flask-Session==0.4.0
+waitress==2.1.2
+expiringdict==1.2.2
+langdetect==1.0.9
+lexilang==1.0.6
+morfessor==2.0.6
+appdirs==1.4.4
+APScheduler==3.9.1
+translatehtml==1.5.2
+argos-translate-files==1.4.0
+itsdangerous==2.1.2
+Werkzeug==2.3.8
+requests==2.31.0
+redis==4.4.4
+numpy<2
+prometheus-client==0.15.0
+polib==1.1.1
+packaging==23.1
+torch==2.4.0; python_version < "3.9"
+torch==2.5.0; python_version >= "3.9"
