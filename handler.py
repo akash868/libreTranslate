@@ -30,7 +30,7 @@ import urllib.parse
 import urllib.request
 import subprocess
 
-# --- Helper: try common import paths for app object ---
+# ---Helper: try common import paths for app object ---
 COMMON_PATHS = [
     "main:app",
     "app:app",
